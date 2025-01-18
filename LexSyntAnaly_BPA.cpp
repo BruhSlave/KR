@@ -8,6 +8,7 @@
 #include <sstream>
 #include <iomanip>
 
+
 using namespace std;
 
 #define MAX_LOADSTRING 100
@@ -25,6 +26,7 @@ ATOM MyRegisterClass(HINSTANCE hInstance);
 BOOL InitInstance(HINSTANCE, int);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK About(HWND, UINT, WPARAM, LPARAM);
+
 
 // Структура для токенов
 struct Token {
@@ -83,6 +85,23 @@ const vector<pair<string, string>> TOKENS = {
     {"CharLiteral", R"('([^']|\\')*')"},              // Символьные литералы
     {"Space", R"(\s+)"},                              // Пробелы
 };
+// Узел дерева синтаксического разбора
+struct ParseNode {
+    string value;
+    vector<ParseNode*> children;
+
+    ParseNode(const string& val) : value(val) {}
+
+    ~ParseNode() {
+        for (auto child : children) {
+            delete child;
+        }
+    }
+
+    void addChild(ParseNode* child) {
+        children.push_back(child);
+    }
+};
 
 // Лексер для разбора текста
 vector<Token> lexer(const string& input) {
@@ -124,6 +143,173 @@ vector<Token> lexer(const string& input) {
     return tokens;
 }
 
+// Прототипы для синтаксического анализа
+ParseNode* parseExpression(const vector<Token>& tokens, size_t& pos);
+ParseNode* parseTerm(const vector<Token>& tokens, size_t& pos);
+ParseNode* parseFactor(const vector<Token>& tokens, size_t& pos);
+void buildParseTreeString(ParseNode* node, string& output, int level = 0);
+
+
+void showError(const string& message) {
+    MessageBoxA(nullptr, message.c_str(), "Syntax Error", MB_OK | MB_ICONERROR);
+}
+
+
+ParseNode* parseFactor(const vector<Token>& tokens, size_t& pos) {
+    if (pos >= tokens.size()) return nullptr;
+
+    if (tokens[pos].type == "Number") {
+        ParseNode* node = new ParseNode(tokens[pos].value);
+        ++pos;
+        return node;
+    }
+
+    if (tokens[pos].type == "OpenBracket") {
+        ++pos;
+        ParseNode* node = parseExpression(tokens, pos);
+
+        if (pos < tokens.size() && tokens[pos].type == "CloseBracket") {
+            ++pos;
+            return node;
+        }
+
+        delete node;
+    }
+
+    return nullptr;
+}
+
+ParseNode* parseTerm(const vector<Token>& tokens, size_t& pos) {
+    ParseNode* node = parseFactor(tokens, pos);
+
+    while (pos < tokens.size() && (tokens[pos].type == "Plus" || tokens[pos].type == "Minus")) {
+        ParseNode* opNode = new ParseNode(tokens[pos].value);
+        ++pos;
+
+        ParseNode* rightNode = parseFactor(tokens, pos);
+        if (rightNode) {
+            opNode->addChild(node);
+            opNode->addChild(rightNode);
+            node = opNode;
+        }
+        else {
+            delete opNode;
+            break;
+        }
+    }
+
+    return node;
+}
+
+
+// Обновленный синтаксический анализатор с проверкой ошибок
+ParseNode* parseExpression(const vector<Token>& tokens, size_t& pos) {
+    ParseNode* node = new ParseNode("E");
+
+    if (pos >= tokens.size()) {
+        showError("Unexpected end of input.");
+        return nullptr;
+    }
+
+    // Обработка идентификатора или числа
+    if (tokens[pos].type == "Variable" || tokens[pos].type == "Number") {
+        node->addChild(new ParseNode(tokens[pos].type == "Variable" ? "I" : "C"));
+        node->children.back()->addChild(new ParseNode(tokens[pos].value));
+        ++pos;
+
+        // Проверка на присваивание
+        if (pos < tokens.size() && tokens[pos].type == "Assign") {
+            node->addChild(new ParseNode("A"));
+            node->children.back()->addChild(new ParseNode(tokens[pos].value));
+            ++pos;
+
+            ParseNode* exprNode = parseExpression(tokens, pos);
+            if (exprNode) {
+                node->addChild(exprNode);
+            }
+            else {
+                showError("Expected expression after assignment.");
+                return nullptr;
+            }
+        }
+    }
+    else if (tokens[pos].type == "OpenBracket") { // Обработка выражений в скобках
+        ++pos;
+        ParseNode* innerExpr = parseExpression(tokens, pos);
+        if (!innerExpr) {
+            showError("Expected expression after '('.");
+            return nullptr;
+        }
+        node->addChild(innerExpr);
+
+        if (pos >= tokens.size() || tokens[pos].type != "CloseBracket") {
+            showError("Missing closing bracket.");
+            return nullptr;
+        }
+        ++pos;
+    }
+    else {
+        showError("Unexpected token: " + tokens[pos].value);
+        return nullptr;
+    }
+
+    // Обработка операций +, -, *, /
+    while (pos < tokens.size() &&
+        (tokens[pos].type == "Plus" || tokens[pos].type == "Minus" ||
+            tokens[pos].type == "Mult" || tokens[pos].type == "Division")) {
+        string op = tokens[pos].value;
+        ParseNode* opNode = new ParseNode(op);
+        ++pos;
+
+        ParseNode* rightNode = parseExpression(tokens, pos);
+        if (!rightNode) {
+            showError("Expected expression after operator '" + op + "'.");
+            return nullptr;
+        }
+        opNode->addChild(node);
+        opNode->addChild(rightNode);
+        node = opNode;
+    }
+
+    return node;
+}
+
+
+ParseNode* parseStatement(const vector<Token>& tokens, size_t& pos) {
+    ParseNode* node = new ParseNode("S");
+
+    ParseNode* exprNode = parseExpression(tokens, pos);
+    if (!exprNode) {
+        showError("Error parsing expression.");
+        return nullptr;
+    }
+    node->addChild(exprNode);
+
+    if (pos < tokens.size() && tokens[pos].type == "Semicolon") {
+        node->addChild(new ParseNode(";"));
+        ++pos;
+    }
+    else {
+        showError("Missing semicolon.");
+        return nullptr;
+    }
+
+    return node;
+}
+
+void buildParseTreeString(ParseNode* node, string& output, int level) {
+    if (!node) return;
+
+    // Добавляем текущий узел с отступом
+    output += string(level * 2, ' ') + node->value + "\r\n";
+
+    // Рекурсивно добавляем потомков
+    for (auto child : node->children) {
+        buildParseTreeString(child, output, level + 1);
+    }
+}
+
+
 // Функция для обработки текста и отображения токенов
 void ProcessInput(HWND hwndInput, HWND hwndOutput) {
     int length = GetWindowTextLength(hwndInput);
@@ -150,8 +336,26 @@ void ProcessInput(HWND hwndInput, HWND hwndOutput) {
             << wstring(token.type.begin(), token.type.end()) << L"\r\n";
     }
 
+    size_t pos = 0;
+    ParseNode* root = parseStatement(tokens, pos);
+
+    output << L"\r\nParse Tree:\r\n";
+    if (root) {
+        string treeOutput;
+        buildParseTreeString(root, treeOutput);
+        output << wstring(treeOutput.begin(), treeOutput.end());
+        delete root;
+    }
+    else {
+        output << L"Error: Unable to parse the input.\r\n";
+    }
+
     SetWindowText(hwndOutput, output.str().c_str());
 }
+
+
+
+
 
 // Главная функция
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow) {
@@ -197,7 +401,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow) {
     hInst = hInstance;
 
     HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, 0, 800, 630, nullptr, nullptr, hInstance, nullptr);
+        CW_USEDEFAULT, 0, 800, 830, nullptr, nullptr, hInstance, nullptr);
 
     if (!hWnd) {
         return FALSE;
@@ -217,10 +421,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             10, 10, 760, 200, hWnd, (HMENU)IDC_INPUT_EDIT, hInst, nullptr);
 
         hwndOutput = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
-            10, 220, 760, 300, hWnd, (HMENU)IDC_OUTPUT_EDIT, hInst, nullptr);
+            10, 220, 760, 500, hWnd, (HMENU)IDC_OUTPUT_EDIT, hInst, nullptr);
 
         hwndButton = CreateWindow(L"BUTTON", L"Process", WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
-            340, 530, 100, 30, hWnd, (HMENU)IDC_PROCESS_BUTTON, hInst, nullptr);
+            340, 730, 100, 30, hWnd, (HMENU)IDC_PROCESS_BUTTON, hInst, nullptr);
         break;
 
     case WM_COMMAND:
